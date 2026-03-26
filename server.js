@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken'); // Nayi line
 require('dotenv').config();
+const { scrapeInstaReel } = require('./scraper');
 
 const { Token, Agent, InstaUser, Video } = require('./models');
 const bot = require('./bot');
@@ -29,6 +30,9 @@ const authenticateAdmin = (req, res, next) => {
         res.status(403).json({ message: 'Invalid or Expired Token!' });
     }
 };
+
+
+
 
 // --- 1. ADMIN LOGIN API (Public) ---
 app.post('/admin/login', (req, res) => {
@@ -112,11 +116,26 @@ app.post('/admin/videos/:id/approve', authenticateAdmin, async (req, res) => {
     }
 });
 
-// 6. Admin API: Reject Video
+// 6. Admin API: Reject Video (FIXED: Deletes the video to allow resubmission)
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
-        await Video.findByIdAndUpdate(req.params.id, { status: 'Rejected' });
-        res.json({ message: "Video rejected" });
+        // Video ko delete kar do taaki unique constraint hat jaye aur user resubmit kar sake
+        await Video.findByIdAndDelete(req.params.id);
+        res.json({ message: "Video rejected and removed from system to allow resubmission." });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});     
+
+app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
+    const { url } = req.body;
+    try {
+        const views = await scrapeInstaReel(url);
+        if (views !== null) {
+            res.json({ success: true, views });
+        } else {
+            res.status(400).json({ success: false, message: "Could not fetch views. IG blocked or reel is private." });
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
