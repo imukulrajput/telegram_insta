@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken'); // Nayi line
 require('dotenv').config();
-const { scrapeInstaReel } = require('./scraper');
+
 
 const { Token, Agent, InstaUser, Video } = require('./models');
 const bot = require('./bot');
@@ -60,24 +60,72 @@ app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
     }
 });
 
-// 3. Admin API: View Payments/Stats
+// 1. Get Payments & Stats
 app.get('/admin/payments', authenticateAdmin, async (req, res) => {
     try {
         const agents = await Agent.find();
-        const agentPayments = agents.map(agent => ({
-            name: agent.name,
-            accountsAdded: agent.totalInstaAccountsAdded,
-            earnings: Math.floor(agent.totalInstaAccountsAdded / 10) * 100
-        }));
+        const agentPayments = agents.map(agent => {
+            const totalEarned = agent.totalInstaAccountsAdded * 200; // Rs 200 per account
+            const paid = agent.paidAmount || 0;
+            const pending = totalEarned - paid;
+            return {
+                id: agent._id,
+                name: agent.name,
+                bankDetails: agent.bankDetails,
+                accountsAdded: agent.totalInstaAccountsAdded,
+                totalEarned,
+                paidAmount: paid,
+                pendingAmount: pending > 0 ? pending : 0
+            };
+        });
 
         const instaUsers = await InstaUser.find();
-        const userPayments = instaUsers.map(user => ({
-            username: user.instaUsername,
-            totalViews: user.totalViews,
-            earnings: Math.floor(user.totalViews / 1000000) * 500
-        }));
+        const userPayments = instaUsers.map(user => {
+            const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800; // Rs 800 per 1M views
+            const paid = user.paidAmount || 0;
+            const pending = totalEarned - paid;
+            return {
+                id: user._id,
+                username: user.instaUsername,
+                bankDetails: user.bankDetails,
+                totalViews: user.totalViews || 0,
+                totalEarned,
+                paidAmount: paid,
+                pendingAmount: pending > 0 ? pending : 0
+            };
+        });
 
         res.json({ agentPayments, userPayments });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2. Clear Agent Payment
+app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
+    try {
+        const agent = await Agent.findById(req.params.id);
+        const pending = (agent.totalInstaAccountsAdded * 200) - (agent.paidAmount || 0);
+        if (pending > 0) {
+            agent.paidAmount = (agent.paidAmount || 0) + pending;
+            await agent.save();
+        }
+        res.json({ message: "Agent payment cleared" });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. Clear Insta User Payment
+app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
+    try {
+        const user = await InstaUser.findById(req.params.id);
+        const pending = (Math.floor((user.totalViews || 0) / 1000000) * 800) - (user.paidAmount || 0);
+        if (pending > 0) {
+            user.paidAmount = (user.paidAmount || 0) + pending;
+            await user.save();
+        }
+        res.json({ message: "User payment cleared" });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -127,19 +175,7 @@ app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     }
 });     
 
-app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
-    const { url } = req.body;
-    try {
-        const views = await scrapeInstaReel(url);
-        if (views !== null) {
-            res.json({ success: true, views });
-        } else {
-            res.status(400).json({ success: false, message: "Could not fetch views. IG blocked or reel is private." });
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+
 
 // Start Server and Bot
 const PORT = process.env.PORT || 3000;

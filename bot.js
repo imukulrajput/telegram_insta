@@ -7,6 +7,7 @@ bot.use(session());
 
 const cleanUsername = (username) => username.replace('@', '').trim().toLowerCase();
 
+// --- SMART DYNAMIC MENU ---
 const getMenu = async (telegramId) => {
     const isAgent = await Agent.findOne({ telegramId });
     const isInstaUser = await InstaUser.findOne({ telegramId });
@@ -66,8 +67,19 @@ bot.hears('🎥 Submit My Videos', async (ctx) => {
 bot.hears('💰 My Earnings', async (ctx) => {
     const user = await InstaUser.findOne({ telegramId: ctx.from.id });
     if (!user) return ctx.reply("Your account is not linked.");
-    const earnings = Math.floor(user.totalViews / 1000000) * 500; 
-    ctx.reply(`👤 **Creator Stats (@${user.instaUsername})**\n\n**Total Approved Views:** ${user.totalViews.toLocaleString()}\n**Total Earnings:** ₹${earnings}\n\nKeep uploading and earning! 🚀`);
+    
+    const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800; // Rs 800 per 1M views
+    const paid = user.paidAmount || 0;
+    const pending = totalEarned - paid;
+
+    ctx.reply(
+        `👤 **Creator Stats (@${user.instaUsername})**\n\n` +
+        `👀 **Total Approved Views:** ${user.totalViews.toLocaleString()}\n\n` +
+        `💰 **Total Earned:** ₹${totalEarned}\n` +
+        `✅ **Amount Received:** ₹${paid}\n` +
+        `⏳ **Pending Payment:** ₹${pending > 0 ? pending : 0}\n\n` +
+        `Keep uploading and earning! 🚀`
+    );
 });
 
 bot.hears('🔌 Unlink / Logout', async (ctx) => {
@@ -78,22 +90,25 @@ bot.hears('🔌 Unlink / Logout', async (ctx) => {
     ctx.reply("🔌 Your account has been successfully unlinked (logged out).", await getMenu(ctx.from.id));
 });
 
-// --- SMART PAGINATED PROFILE FUNCTION ---
+// --- SMART PAGINATED PROFILE & PAYMENT TRACKER ---
 const getProfileMessageAndKeyboard = async (telegramId, page = 0) => {
     const agent = await Agent.findOne({ telegramId });
     const addedUsers = await InstaUser.find({ addedByAgentTelegramId: telegramId });
-    const earnings = Math.floor(agent.totalInstaAccountsAdded / 10) * 100;
+    
+    const totalEarned = agent.totalInstaAccountsAdded * 200; // Rs 200 per account
+    const paid = agent.paidAmount || 0;
+    const pending = totalEarned - paid;
 
     let profileMessage = `👤 **Agent Profile (${agent.name})**\n`;
-    profileMessage += `**Accounts Added:** ${agent.totalInstaAccountsAdded}\n**Earnings:** ₹${earnings}\n\n`;
+    profileMessage += `**Accounts Added:** ${agent.totalInstaAccountsAdded}\n\n`;
+    profileMessage += `💰 **Total Earned:** ₹${totalEarned}\n`;
+    profileMessage += `✅ **Amount Received:** ₹${paid}\n`;
+    profileMessage += `⏳ **Pending Payment:** ₹${pending > 0 ? pending : 0}\n\n`;
 
     const inlineButtons = [];
-    
-    // FIX EDGE CASE 3: Agent can edit their own bank details
     inlineButtons.push([Markup.button.callback(`🏦 Edit MY Agent Bank Details`, `editbank_self`)]);
 
     if (addedUsers.length > 0) {
-        // FIX EDGE CASE 4: Pagination (10 accounts per page)
         const limit = 10;
         const totalPages = Math.ceil(addedUsers.length / limit);
         const start = page * limit;
@@ -106,12 +121,10 @@ const getProfileMessageAndKeyboard = async (telegramId, page = 0) => {
             inlineButtons.push([Markup.button.callback(`✏️ Edit @${user.instaUsername} ${isLinked}`, `editbank_${user.instaUsername}`)]);
         });
 
-        // Add Navigation Buttons if needed
         const navButtons = [];
         if (page > 0) navButtons.push(Markup.button.callback(`⬅️ Prev`, `page_${page - 1}`));
         if (page < totalPages - 1) navButtons.push(Markup.button.callback(`Next ➡️`, `page_${page + 1}`));
         if (navButtons.length > 0) inlineButtons.push(navButtons);
-
     } else {
         profileMessage += `🤷‍♂️ You haven't added any Instagram accounts yet.`;
     }
@@ -126,7 +139,6 @@ bot.hears('📊 My Agent Profile', async (ctx) => {
     ctx.reply(profileMessage, keyboard);
 });
 
-// Handle Pagination Clicks
 bot.action(/^page_(\d+)$/, async (ctx) => {
     try {
         const page = parseInt(ctx.match[1]);
@@ -136,17 +148,14 @@ bot.action(/^page_(\d+)$/, async (ctx) => {
     } catch (e) { console.error(e); }
 });
 
-// Handle Bank Edit Clicks
 bot.action(/^editbank_(.+)$/, async (ctx) => {
     try {
         const target = ctx.match[1];
-        
         if (target === 'self') {
             ctx.session = { step: 'AWAITING_AGENT_NEW_BANK' };
             await ctx.answerCbQuery().catch(()=>{}); 
             return ctx.reply(`🏦 You are updating **YOUR OWN** Agent Bank Details.\n\nPlease enter the **New Bank Details**:`);
         }
-
         const user = await InstaUser.findOne({ instaUsername: target, addedByAgentTelegramId: ctx.from.id });
         if (!user) {
             await ctx.answerCbQuery("❌ You are not authorized to edit this user.", { show_alert: true }).catch(()=>{});
@@ -172,7 +181,6 @@ bot.on('message', async (ctx) => {
     if (ignoreList.includes(text)) return;
 
     try {
-        // ... (Agent Registration & Add User logic is identical, kept brief for space)
         if (state === 'AWAITING_TOKEN') {
             const tokenRecord = await Token.findOne({ token: text, isUsed: false });
             if (!tokenRecord) return ctx.reply("❌ Invalid token.");
@@ -195,7 +203,7 @@ bot.on('message', async (ctx) => {
             return ctx.reply(`ID @${cleanId} saved! ✅\nNow enter their **Bank Details**:`);
         }
         if (state === 'AWAITING_INSTA_BANK') {
-            if (await InstaUser.findOne({ bankDetails: text })) return ctx.reply("❌ Bank details already linked to another user. Enter unique details:");
+            if (await InstaUser.findOne({ bankDetails: text })) return ctx.reply("❌ Bank details already linked to another user.");
             const savedInstaId = ctx.session.tempInstaId;
             await InstaUser.create({ instaUsername: savedInstaId, bankDetails: text, addedByAgentTelegramId: telegramId });
             await Agent.updateOne({ telegramId }, { $inc: { totalInstaAccountsAdded: 1 } });
@@ -216,14 +224,11 @@ bot.on('message', async (ctx) => {
             ctx.session = null; return ctx.reply("🎉 Account successfully linked!", await getMenu(telegramId));
         }
 
-        // --- SUBMIT MY VIDEOS (FIXED EDGE CASE 2: STRICT INSTA LINKS) ---
+        // --- SUBMIT MY VIDEOS (STRICT INSTA VALIDATION) ---
         if (state === 'AWAITING_MY_VIDEO_LINKS') {
             const formattedText = text.replace(/(https?:\/\/)/gi, ' $1');
-            
-            // STRICT REGEX: Must contain instagram.com
             const instaRegex = /(https?:\/\/(?:www\.)?instagram\.com[^\s]+)/gi;
             const rawLinks = formattedText.match(instaRegex) || [];
-            
             const uniquePastedLinks = [...new Set(rawLinks)];
 
             if (uniquePastedLinks.length === 0) {
@@ -256,22 +261,18 @@ bot.on('message', async (ctx) => {
             return ctx.reply(replyMsg, await getMenu(telegramId));
         }
 
-        // --- EDIT OWN AGENT BANK DETAILS ---
         if (state === 'AWAITING_AGENT_NEW_BANK') {
             await Agent.updateOne({ telegramId }, { bankDetails: text });
-            ctx.session = null;
-            return ctx.reply(`✅ Your Agent bank details have been successfully updated!`, await getMenu(telegramId));
+            ctx.session = null; return ctx.reply(`✅ Your Agent bank details have been successfully updated!`, await getMenu(telegramId));
         }
 
-        // --- EDIT USER BANK DETAILS ---
         if (state === 'AWAITING_NEW_BANK') {
             const targetUsername = ctx.session.editInstaId;
             if (await InstaUser.findOne({ bankDetails: text, instaUsername: { $ne: targetUsername } })) {
                 return ctx.reply("❌ Bank details are used by another account. Enter unique details:");
             }
             await InstaUser.updateOne({ instaUsername: targetUsername }, { bankDetails: text });
-            ctx.session = null;
-            return ctx.reply(`✅ Bank details for **@${targetUsername}** successfully updated!`, await getMenu(telegramId));
+            ctx.session = null; return ctx.reply(`✅ Bank details for **@${targetUsername}** successfully updated!`, await getMenu(telegramId));
         }
 
     } catch (error) {
