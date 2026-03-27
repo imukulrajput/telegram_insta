@@ -181,33 +181,27 @@ app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
 app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
     const { url } = req.body;
     try {
-        // Instagram Looter API mostly shortcode mangti hai (e.g. reel/C12345/ se C12345 nikalna)
-        const getShortcode = (link) => {
-            const match = link.match(/(?:reel|p|tv)\/([a-zA-Z0-9_-]+)/);
-            return match ? match[1] : link; // Agar regex fail ho toh pura link bhej do
-        };
-        const shortcode = getShortcode(url);
-
         const options = {
             method: 'GET',
-            // DHYAN DEIN: Yahan apne RapidAPI dashboard se "Post/Reel Details" wale endpoint ka URL dalein. 
-            // Niche diya gaya URL ek example hai is API ke mutabiq:
-            url: 'https://instagram-looter2.p.rapidapi.com/post-details', 
+            url: 'https://instagram-looter2.p.rapidapi.com/post', // Screenshot 1 wala sahi URL
             params: {
-                shortcode: shortcode // Ya agar API pura link leti hai toh: url: url
+                url: url // Direct pura link bhej rahe hain
             },
             headers: {
-                'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-                'X-RapidAPI-Host': process.env.RAPIDAPI_HOST
+                'x-rapidapi-key': process.env.RAPIDAPI_KEY,
+                'x-rapidapi-host': process.env.RAPIDAPI_HOST
             }
         };
 
         const response = await axios.request(options);
         
-        // API ke response format ke hisaab se view count nikalein (console.log karke dekh lena API kya bhej rahi hai)
-        const views = response.data?.view_count || response.data?.video_view_count || response.data?.views;
+        // Debugging ke liye: PM2 logs me check karne ke liye ki API kya bhej rahi hai
+        // console.log("API Response Data:", response.data);
 
-        if (views !== undefined) {
+        // Instagram APIs alag-alag naam se views bhejti hain, humne sab popular naam daal diye hain
+        const views = response.data?.view_count || response.data?.video_view_count || response.data?.play_count;
+
+        if (views !== undefined && views !== null) {
             res.json({ success: true, views: views });
         } else {
             res.status(400).json({ success: false, message: "Views count not found in API response." });
@@ -215,7 +209,7 @@ app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
 
     } catch (error) {
         console.error("RapidAPI Error:", error.response ? error.response.data : error.message);
-        res.status(500).json({ success: false, message: "RapidAPI fetch failed." });
+        res.status(500).json({ success: false, message: "RapidAPI fetch failed. Check server logs." });
     }
 });
 
