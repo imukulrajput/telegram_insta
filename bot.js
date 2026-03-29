@@ -7,7 +7,16 @@ bot.use(session());
 
 const cleanUsername = (username) => username.replace('@', '').trim().toLowerCase();
 
-// --- SMART DYNAMIC MENU ---
+// --- SMART WEEKEND CHECKER (IST Timezone) ---
+const isWeekendIST = () => {
+    const currentUtc = new Date();
+    const istTime = new Date(currentUtc.getTime() + (5.5 * 60 * 60 * 1000));
+    const day = istTime.getUTCDay(); // 0 = Sunday, 6 = Saturday
+    return day === 0 || day === 6;
+};
+
+const weekendErrorMessage = "🚫 **Submission Closed for the Weekend!**\n\nVideo submission is only allowed from **Monday to Friday**.\nWe are currently auditing views and processing payments! 💸\n\nPlease submit your new videos starting Monday morning.";
+
 const getMenu = async (telegramId) => {
     const isAgent = await Agent.findOne({ telegramId });
     const isInstaUser = await InstaUser.findOne({ telegramId });
@@ -60,6 +69,13 @@ bot.hears('➕ Add Insta User', async (ctx) => {
 bot.hears('🎥 Submit My Videos', async (ctx) => {
     const user = await InstaUser.findOne({ telegramId: ctx.from.id });
     if (!user) return ctx.reply("Your account is not linked. Please click '🔗 Link Insta Account' first.");
+
+    // CHECK 1: Button click karne par block karo
+    if (isWeekendIST()) {
+        ctx.session = null; // Session clear karo taaki link ka wait na kare
+        return ctx.reply(weekendErrorMessage);
+    }
+
     ctx.session = { step: 'AWAITING_MY_VIDEO_LINKS' };
     ctx.reply(`Welcome @${user.instaUsername}! ✅\n\nNow, send your video **Links**.\nYou can send multiple links in a single message.`);
 });
@@ -68,7 +84,7 @@ bot.hears('💰 My Earnings', async (ctx) => {
     const user = await InstaUser.findOne({ telegramId: ctx.from.id });
     if (!user) return ctx.reply("Your account is not linked.");
     
-    const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800; // Rs 800 per 1M views
+    const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800;
     const paid = user.paidAmount || 0;
     const pending = totalEarned - paid;
 
@@ -90,12 +106,11 @@ bot.hears('🔌 Unlink / Logout', async (ctx) => {
     ctx.reply("🔌 Your account has been successfully unlinked (logged out).", await getMenu(ctx.from.id));
 });
 
-// --- SMART PAGINATED PROFILE & PAYMENT TRACKER ---
 const getProfileMessageAndKeyboard = async (telegramId, page = 0) => {
     const agent = await Agent.findOne({ telegramId });
     const addedUsers = await InstaUser.find({ addedByAgentTelegramId: telegramId });
     
-    const totalEarned = agent.totalInstaAccountsAdded * 200; // Rs 200 per account
+    const totalEarned = agent.totalInstaAccountsAdded * 200;
     const paid = agent.paidAmount || 0;
     const pending = totalEarned - paid;
 
@@ -115,12 +130,10 @@ const getProfileMessageAndKeyboard = async (telegramId, page = 0) => {
         const pageUsers = addedUsers.slice(start, start + limit);
 
         profileMessage += `👥 **Your Added Accounts (Page ${page + 1}/${totalPages}):**\n`;
-        
         pageUsers.forEach((user) => {
             const isLinked = user.telegramId ? '✅' : '⏳';
             inlineButtons.push([Markup.button.callback(`✏️ Edit @${user.instaUsername} ${isLinked}`, `editbank_${user.instaUsername}`)]);
         });
-
         const navButtons = [];
         if (page > 0) navButtons.push(Markup.button.callback(`⬅️ Prev`, `page_${page - 1}`));
         if (page < totalPages - 1) navButtons.push(Markup.button.callback(`Next ➡️`, `page_${page + 1}`));
@@ -164,12 +177,9 @@ bot.action(/^editbank_(.+)$/, async (ctx) => {
         ctx.session = { step: 'AWAITING_NEW_BANK', editInstaId: target };
         await ctx.answerCbQuery().catch(()=>{}); 
         await ctx.reply(`✏️ You are updating the bank details for **@${target}**.\n\nPlease enter the **New Bank Details**:`);
-    } catch (error) {
-        console.error("Button Action Error: ", error);
-    }
+    } catch (error) { console.error("Button Action Error: ", error); }
 });
 
-// --- MAIN MESSAGE HANDLER ---
 bot.on('message', async (ctx) => {
     const state = ctx.session?.step;
     if (!state || !ctx.message.text) return;
@@ -224,8 +234,13 @@ bot.on('message', async (ctx) => {
             ctx.session = null; return ctx.reply("🎉 Account successfully linked!", await getMenu(telegramId));
         }
 
-        // --- SUBMIT MY VIDEOS (STRICT INSTA VALIDATION) ---
         if (state === 'AWAITING_MY_VIDEO_LINKS') {
+            // CHECK 2: Link paste karte waqt wapas check karo ki weekend toh nahi hai!
+            if (isWeekendIST()) {
+                ctx.session = null; // Session destroy kar do
+                return ctx.reply(weekendErrorMessage);
+            }
+
             const formattedText = text.replace(/(https?:\/\/)/gi, ' $1');
             const instaRegex = /(https?:\/\/(?:www\.)?instagram\.com[^\s]+)/gi;
             const rawLinks = formattedText.match(instaRegex) || [];
@@ -253,7 +268,7 @@ bot.on('message', async (ctx) => {
             await Video.insertMany(videoDocs);
             ctx.session = null;
 
-            let replyMsg = `🎉 Success! **${newLinks.length}** new Instagram link(s) submitted.`;
+            let replyMsg = `🎉 Success! **${newLinks.length}** new Instagram link(s) submitted for this week.`;
             if (existingLinks.length > 0) replyMsg += `\n⚠️ **${existingLinks.length}** link(s) were ignored (already in system).`;
             if (uniquePastedLinks.length < formattedText.match(/(https?:\/\/[^\s]+)/g)?.length) {
                 replyMsg += `\n🚮 Note: Non-Instagram links were automatically ignored.`;

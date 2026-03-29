@@ -2,10 +2,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const cors = require('cors');
-const jwt = require('jsonwebtoken'); // Nayi line
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const axios = require('axios');
-
 
 const { Token, Agent, InstaUser, Video } = require('./models');
 const bot = require('./bot');
@@ -15,32 +14,27 @@ app.use(cors());
 app.use(express.json());
 
 // --- JWT AUTHENTICATION MIDDLEWARE ---
-// Ye function har admin API call se pehle check karega ki token valid hai ya nahi
 const authenticateAdmin = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ message: 'Access Denied: No Token Provided!' });
     }
-
     const token = authHeader.split(' ')[1];
     try {
         const verified = jwt.verify(token, process.env.JWT_SECRET);
         req.admin = verified;
-        next(); // Token sahi hai, aage jane do
+        next(); 
     } catch (error) {
         res.status(403).json({ message: 'Invalid or Expired Token!' });
     }
 };
 
-
-
-
-// --- 1. ADMIN LOGIN API (Public) ---
+// ==========================================
+// 1. AUTH & TOKEN APIs
+// ==========================================
 app.post('/admin/login', (req, res) => {
     const { username, password } = req.body;
-
     if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
-        // Token generate karo jo 12 ghante baad expire ho jayega
         const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '12h' });
         res.json({ message: "Login Successful", token });
     } else {
@@ -48,9 +42,6 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// --- SECURE ADMIN APIs (Yahan humne 'authenticateAdmin' guard laga diya) ---
-
-// 2. Admin API: Generate Secret Token
 app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
     try {
         const rawToken = crypto.randomBytes(4).toString('hex').toUpperCase(); 
@@ -61,48 +52,47 @@ app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
     }
 });
 
-// 1. Get Payments & Stats
+// ==========================================
+// 2. PAYMENT APIs
+// ==========================================
 app.get('/admin/payments', authenticateAdmin, async (req, res) => {
     try {
         const agents = await Agent.find();
         const agentPayments = agents.map(agent => {
-            const totalEarned = agent.totalInstaAccountsAdded * 200; // Rs 200 per account
+            const totalEarned = agent.totalInstaAccountsAdded * 200;
             const paid = agent.paidAmount || 0;
             const pending = totalEarned - paid;
             return {
-                id: agent._id,
-                name: agent.name,
-                bankDetails: agent.bankDetails,
+                id: agent._id, name: agent.name, bankDetails: agent.bankDetails,
+                telegramId: agent.telegramId, // Mapping ke liye
                 accountsAdded: agent.totalInstaAccountsAdded,
-                totalEarned,
-                paidAmount: paid,
-                pendingAmount: pending > 0 ? pending : 0
+                totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0
             };
         });
 
         const instaUsers = await InstaUser.find();
         const userPayments = instaUsers.map(user => {
-            const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800; // Rs 800 per 1M views
+            const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800;
             const paid = user.paidAmount || 0;
             const pending = totalEarned - paid;
+            
+            // SMART LINK: Kis agent ne isko add kiya tha (Search Filter ke liye)
+            const parentAgent = agents.find(a => a.telegramId === user.addedByAgentTelegramId);
+            const agentName = parentAgent ? parentAgent.name : "Unknown Agent";
+
             return {
-                id: user._id,
-                username: user.instaUsername,
-                bankDetails: user.bankDetails,
+                id: user._id, username: user.instaUsername, bankDetails: user.bankDetails,
+                agentName: agentName, // UI me filter karne me kaam aayega
                 totalViews: user.totalViews || 0,
-                totalEarned,
-                paidAmount: paid,
-                pendingAmount: pending > 0 ? pending : 0
+                totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0
             };
         });
-
         res.json({ agentPayments, userPayments });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// 2. Clear Agent Payment
 app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
     try {
         const agent = await Agent.findById(req.params.id);
@@ -112,12 +102,9 @@ app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
             await agent.save();
         }
         res.json({ message: "Agent payment cleared" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 3. Clear Insta User Payment
 app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
     try {
         const user = await InstaUser.findById(req.params.id);
@@ -127,66 +114,86 @@ app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
             await user.save();
         }
         res.json({ message: "User payment cleared" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 4. Admin API: Get all Pending Videos
-app.get('/admin/videos/pending', authenticateAdmin, async (req, res) => {
+// ==========================================
+// 3. WEEKLY VIDEO MANAGEMENT APIs
+// ==========================================
+
+// Get All Active Videos (Current Week)
+app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     try {
-        const videos = await Video.find({ status: 'Pending' });
+        const videos = await Video.find({ status: { $ne: 'Archived' } });
         res.json(videos);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 5. Admin API: Approve Video & Update Views
-app.post('/admin/videos/:id/approve', authenticateAdmin, async (req, res) => {
+// NAYI API: Get All Archived (History) Videos
+app.get('/admin/videos/archived', authenticateAdmin, async (req, res) => {
+    try {
+        // .sort({_id: -1}) se sabse latest purani video sabse upar aayegi
+        const videos = await Video.find({ status: 'Archived' }).sort({ _id: -1 });
+        res.json(videos);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Update Views and User Earnings
+app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) => {
     try {
         const { views } = req.body;
         const video = await Video.findById(req.params.id);
         
-        if (!video) return res.status(404).json({ message: "Video not found" });
+        const oldViews = video.views || 0;
+        const newViews = parseInt(views) || 0;
+        const viewDifference = newViews - oldViews;
 
-        video.status = 'Approved';
-        video.views = Number(views) || 0;
+        video.views = newViews;
         await video.save();
 
-        await InstaUser.findOneAndUpdate(
+        await InstaUser.updateOne(
             { instaUsername: video.instaUsername },
-            { $inc: { totalViews: Number(views) || 0 } }
+            { $inc: { totalViews: viewDifference } }
         );
 
-        res.json({ message: "Video approved and views updated successfully" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json({ message: "Views and Earnings updated!" });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 6. Admin API: Reject Video (FIXED: Deletes the video to allow resubmission)
+// Smart Reject Video (Deletes it & Deducts Views)
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
-        // Video ko delete kar do taaki unique constraint hat jaye aur user resubmit kar sake
+        const video = await Video.findById(req.params.id);
+        if (!video) return res.status(404).json({ message: "Video not found" });
+
+        if (video.views > 0) {
+            await InstaUser.updateOne(
+                { instaUsername: video.instaUsername },
+                { $inc: { totalViews: -video.views } }
+            );
+        }
+
         await Video.findByIdAndDelete(req.params.id);
-        res.json({ message: "Video rejected and removed from system to allow resubmission." });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});     
+        res.json({ message: "Video rejected and views deducted from earnings." });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+}); 
 
+// Weekly Reset (Archive All Active Videos)
+app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
+    try {
+        await Video.updateMany({ status: { $ne: 'Archived' } }, { status: 'Archived' });
+        res.json({ message: "Dashboard cleared for the new week!" });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
-// --- RAPID API: Auto-Fetch Views ---
+// RapidAPI: Auto-Fetch Views
 app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
     const { url } = req.body;
     try {
         const options = {
             method: 'GET',
-            url: 'https://instagram-looter2.p.rapidapi.com/post', // Screenshot 1 wala sahi URL
-            params: {
-                url: url // Direct pura link bhej rahe hain
-            },
+            url: 'https://instagram-looter2.p.rapidapi.com/post', 
+            params: { url: url },
             headers: {
                 'x-rapidapi-key': process.env.RAPIDAPI_KEY,
                 'x-rapidapi-host': process.env.RAPIDAPI_HOST
@@ -194,11 +201,6 @@ app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
         };
 
         const response = await axios.request(options);
-        
-        // Debugging ke liye: PM2 logs me check karne ke liye ki API kya bhej rahi hai
-        // console.log("API Response Data:", response.data);
-
-        // Instagram APIs alag-alag naam se views bhejti hain, humne sab popular naam daal diye hain
         const views = response.data?.view_count || response.data?.video_view_count || response.data?.play_count;
 
         if (views !== undefined && views !== null) {
@@ -206,15 +208,15 @@ app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
         } else {
             res.status(400).json({ success: false, message: "Views count not found in API response." });
         }
-
     } catch (error) {
         console.error("RapidAPI Error:", error.response ? error.response.data : error.message);
-        res.status(500).json({ success: false, message: "RapidAPI fetch failed. Check server logs." });
+        res.status(500).json({ success: false, message: "RapidAPI fetch failed." });
     }
 });
 
-
-// Start Server and Bot
+// ==========================================
+// 4. SERVER STARTUP
+// ==========================================
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(process.env.MONGO_URI)
