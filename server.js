@@ -51,7 +51,7 @@ app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
 });
 
 // ==========================================
-// 2. PAYMENT APIs (With History)
+// 2. PAYMENT APIs (Proportional Logic & History)
 // ==========================================
 app.get('/admin/payments', authenticateAdmin, async (req, res) => {
     try {
@@ -70,7 +70,8 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
 
         const instaUsers = await InstaUser.find();
         const userPayments = instaUsers.map(user => {
-            const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800;
+            // PROPORTIONAL MATH (Decimals allowed)
+            const totalEarned = ((user.totalViews || 0) / 1000000) * 800;
             const paid = user.paidAmount || 0;
             const pending = totalEarned - paid;
             
@@ -80,8 +81,10 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
             return {
                 id: user._id, username: user.instaUsername, bankDetails: user.bankDetails,
                 agentName: agentName, totalViews: user.totalViews || 0,
-                totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0,
-                paymentHistory: user.paymentHistory || [] // Added History for UI
+                totalEarned: totalEarned.toFixed(4), 
+                paidAmount: paid.toFixed(4), 
+                pendingAmount: pending > 0 ? pending.toFixed(4) : "0.0000",
+                paymentHistory: user.paymentHistory || []
             };
         });
         res.json({ agentPayments, userPayments });
@@ -100,21 +103,21 @@ app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Enhanced Pay API: Adds to history & notifies user
+// Enhanced Pay API: Adds to history & notifies user on Telegram
 app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
     try {
         const user = await InstaUser.findById(req.params.id);
-        const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800;
+        const totalEarned = ((user.totalViews || 0) / 1000000) * 800;
         const pending = totalEarned - (user.paidAmount || 0);
         
-        if (pending > 0) {
+        if (pending > 0.0001) { // Micro-payments protection
             user.paidAmount = (user.paidAmount || 0) + pending;
-            user.paymentHistory.push({ amount: pending, date: new Date() });
+            user.paymentHistory.push({ amount: pending.toFixed(4), date: new Date() });
             await user.save();
             
             // Telegram Notification
             if (user.telegramId) {
-                const msg = `✅ *Payment Processed!*\n\nAmount: ₹${pending}\nStatus: Cleared to your linked bank account.\n\nKeep growing! 🚀`;
+                const msg = `✅ *Payment Processed!*\n\nAmount: ₹${pending.toFixed(2)}\nStatus: Cleared to your linked bank account.\n\nKeep growing! 🚀`;
                 bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
             }
         }
@@ -125,16 +128,19 @@ app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
 // ==========================================
 // 3. WEEKLY VIDEO MANAGEMENT APIs
 // ==========================================
+
+// Get only active videos (Exclude Archived and Rejected)
 app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     try {
-        const videos = await Video.find({ status: { $ne: 'Archived' } });
+        const videos = await Video.find({ status: { $nin: ['Archived', 'Rejected'] } });
         res.json(videos);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Get History (Both Archived and Rejected)
 app.get('/admin/videos/archived', authenticateAdmin, async (req, res) => {
     try {
-        const videos = await Video.find({ status: 'Archived' }).sort({ _id: -1 });
+        const videos = await Video.find({ status: { $in: ['Archived', 'Rejected'] } }).sort({ _id: -1 });
         res.json(videos);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -157,7 +163,7 @@ app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) =
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Smart Reject: Asks for Reason, Sends TG Alert & SAVES IN DB
+// SMART REJECT: Saves Reason in DB, marks as Rejected, Sends TG Alert
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
         const { reason } = req.body;
@@ -177,19 +183,20 @@ app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
             bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
         }
 
-        // INSTEAD OF DELETING, WE SAVE IT AS REJECTED
+        // Save in DB as Rejected (DO NOT DELETE)
         video.status = 'Rejected';
         video.rejectionReason = reason;
-        video.views = 0; // Rejected video ke views 0 kar do
+        video.views = 0; // Reset views for rejected video
         await video.save();
 
         res.json({ message: "Video marked as rejected, reason saved, and user notified." });
     } catch (error) { res.status(500).json({ error: error.message }); }
-});
+}); 
 
+// Archive active videos
 app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
     try {
-        await Video.updateMany({ status: { $ne: 'Archived' } }, { status: 'Archived' });
+        await Video.updateMany({ status: { $nin: ['Archived', 'Rejected'] } }, { status: 'Archived' });
         res.json({ message: "Dashboard cleared for the new week!" });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
