@@ -47,13 +47,11 @@ app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
         const rawToken = crypto.randomBytes(4).toString('hex').toUpperCase(); 
         const newToken = await Token.create({ token: rawToken });
         res.json({ message: "Token generated successfully", token: newToken.token });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==========================================
-// 2. PAYMENT APIs
+// 2. PAYMENT APIs (With History)
 // ==========================================
 app.get('/admin/payments', authenticateAdmin, async (req, res) => {
     try {
@@ -64,7 +62,7 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
             const pending = totalEarned - paid;
             return {
                 id: agent._id, name: agent.name, bankDetails: agent.bankDetails,
-                telegramId: agent.telegramId, // Mapping ke liye
+                telegramId: agent.telegramId,
                 accountsAdded: agent.totalInstaAccountsAdded,
                 totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0
             };
@@ -76,21 +74,18 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
             const paid = user.paidAmount || 0;
             const pending = totalEarned - paid;
             
-            // SMART LINK: Kis agent ne isko add kiya tha (Search Filter ke liye)
             const parentAgent = agents.find(a => a.telegramId === user.addedByAgentTelegramId);
             const agentName = parentAgent ? parentAgent.name : "Unknown Agent";
 
             return {
                 id: user._id, username: user.instaUsername, bankDetails: user.bankDetails,
-                agentName: agentName, // UI me filter karne me kaam aayega
-                totalViews: user.totalViews || 0,
-                totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0
+                agentName: agentName, totalViews: user.totalViews || 0,
+                totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0,
+                paymentHistory: user.paymentHistory || [] // Added History for UI
             };
         });
         res.json({ agentPayments, userPayments });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
@@ -105,23 +100,31 @@ app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// Enhanced Pay API: Adds to history & notifies user
 app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
     try {
         const user = await InstaUser.findById(req.params.id);
-        const pending = (Math.floor((user.totalViews || 0) / 1000000) * 800) - (user.paidAmount || 0);
+        const totalEarned = Math.floor((user.totalViews || 0) / 1000000) * 800;
+        const pending = totalEarned - (user.paidAmount || 0);
+        
         if (pending > 0) {
             user.paidAmount = (user.paidAmount || 0) + pending;
+            user.paymentHistory.push({ amount: pending, date: new Date() });
             await user.save();
+            
+            // Telegram Notification
+            if (user.telegramId) {
+                const msg = `✅ *Payment Processed!*\n\nAmount: ₹${pending}\nStatus: Cleared to your linked bank account.\n\nKeep growing! 🚀`;
+                bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
+            }
         }
-        res.json({ message: "User payment cleared" });
+        res.json({ message: "User payment cleared and history updated" });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==========================================
 // 3. WEEKLY VIDEO MANAGEMENT APIs
 // ==========================================
-
-// Get All Active Videos (Current Week)
 app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     try {
         const videos = await Video.find({ status: { $ne: 'Archived' } });
@@ -129,16 +132,14 @@ app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// NAYI API: Get All Archived (History) Videos
 app.get('/admin/videos/archived', authenticateAdmin, async (req, res) => {
     try {
-        // .sort({_id: -1}) se sabse latest purani video sabse upar aayegi
         const videos = await Video.find({ status: 'Archived' }).sort({ _id: -1 });
         res.json(videos);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Update Views and User Earnings
+// Manual View Update
 app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) => {
     try {
         const { views } = req.body;
@@ -151,34 +152,36 @@ app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) =
         video.views = newViews;
         await video.save();
 
-        await InstaUser.updateOne(
-            { instaUsername: video.instaUsername },
-            { $inc: { totalViews: viewDifference } }
-        );
-
-        res.json({ message: "Views and Earnings updated!" });
+        await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: viewDifference } });
+        res.json({ message: "Views and Earnings updated manually!" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Smart Reject Video (Deletes it & Deducts Views)
+// Smart Reject: Asks for Reason & Sends Telegram Alert
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
+        const { reason } = req.body;
         const video = await Video.findById(req.params.id);
         if (!video) return res.status(404).json({ message: "Video not found" });
 
+        const user = await InstaUser.findOne({ instaUsername: video.instaUsername });
+
+        // Deduct views if already added
         if (video.views > 0) {
-            await InstaUser.updateOne(
-                { instaUsername: video.instaUsername },
-                { $inc: { totalViews: -video.views } }
-            );
+            await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: -video.views } });
+        }
+
+        // Notify User
+        if (user && user.telegramId) {
+            const msg = `❌ *Video Rejected!*\n\nYour video link:\n${video.videoLink}\n\n*Reason given by Admin:*\n_${reason || 'Not specified'}_\n\nPlease ensure your videos meet our guidelines.`;
+            bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
         }
 
         await Video.findByIdAndDelete(req.params.id);
-        res.json({ message: "Video rejected and views deducted from earnings." });
+        res.json({ message: "Video rejected, views deducted, and user notified." });
     } catch (error) { res.status(500).json({ error: error.message }); }
 }); 
 
-// Weekly Reset (Archive All Active Videos)
 app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
     try {
         await Video.updateMany({ status: { $ne: 'Archived' } }, { status: 'Archived' });
@@ -186,9 +189,9 @@ app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// RapidAPI: Auto-Fetch Views
+// RapidAPI: Auto-Fetch & Auto-Save
 app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
-    const { url } = req.body;
+    const { url, videoId } = req.body;
     try {
         const options = {
             method: 'GET',
@@ -201,10 +204,19 @@ app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
         };
 
         const response = await axios.request(options);
-        const views = response.data?.view_count || response.data?.video_view_count || response.data?.play_count;
+        const newViews = response.data?.view_count || response.data?.video_view_count || response.data?.play_count;
 
-        if (views !== undefined && views !== null) {
-            res.json({ success: true, views: views });
+        if (newViews !== undefined && newViews !== null) {
+            // AUTO SAVE LOGIC
+            const video = await Video.findById(videoId);
+            if(video) {
+                const oldViews = video.views || 0;
+                const diff = parseInt(newViews) - oldViews;
+                video.views = parseInt(newViews);
+                await video.save();
+                await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: diff } });
+            }
+            res.json({ success: true, views: newViews });
         } else {
             res.status(400).json({ success: false, message: "Views count not found in API response." });
         }

@@ -21,7 +21,11 @@ const InstaUserSchema = new mongoose.Schema({
     addedByAgentTelegramId: { type: Number, required: true },
     totalViews: { type: Number, default: 0 },
     telegramId: { type: Number, default: null },  // <-- Ye nayi line add karni hai
-    paidAmount: { type: Number, default: 0 }
+    paidAmount: { type: Number, default: 0 },
+    paymentHistory: [{ // NAYA FIELD
+        amount: Number,
+        date: { type: Date, default: Date.now }
+    }] 
 });
 
 const VideoSchema = new mongoose.Schema({
