@@ -157,7 +157,7 @@ app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) =
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Smart Reject: Asks for Reason & Sends Telegram Alert
+// Smart Reject: Asks for Reason, Sends TG Alert & SAVES IN DB
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
         const { reason } = req.body;
@@ -177,10 +177,15 @@ app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
             bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
         }
 
-        await Video.findByIdAndDelete(req.params.id);
-        res.json({ message: "Video rejected, views deducted, and user notified." });
+        // INSTEAD OF DELETING, WE SAVE IT AS REJECTED
+        video.status = 'Rejected';
+        video.rejectionReason = reason;
+        video.views = 0; // Rejected video ke views 0 kar do
+        await video.save();
+
+        res.json({ message: "Video marked as rejected, reason saved, and user notified." });
     } catch (error) { res.status(500).json({ error: error.message }); }
-}); 
+});
 
 app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
     try {

@@ -25,7 +25,7 @@ const InstaUserSchema = new mongoose.Schema({
     paymentHistory: [{ // NAYA FIELD
         amount: Number,
         date: { type: Date, default: Date.now }
-    }] 
+    }]
 });
 
 const VideoSchema = new mongoose.Schema({
@@ -33,7 +33,9 @@ const VideoSchema = new mongoose.Schema({
     videoLink: { type: String, required: true, unique: true }, // Added unique: true
     views: { type: Number, default: 0 },
     status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' }, // Nayi line
-    uploadDate: { type: Date, default: Date.now }
+    uploadDate: { type: Date, default: Date.now },
+    rejectionReason: { type: String, default: null } 
+    
 });
 
 module.exports = {
