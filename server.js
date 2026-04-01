@@ -13,7 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- JWT AUTHENTICATION MIDDLEWARE ---
+// --- 1. NORMAL AUTH MIDDLEWARE (For Both Admin & Staff) ---
 const authenticateAdmin = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -22,11 +22,19 @@ const authenticateAdmin = (req, res, next) => {
     const token = authHeader.split(' ')[1];
     try {
         const verified = jwt.verify(token, process.env.JWT_SECRET);
-        req.admin = verified;
+        req.admin = verified; // Contains username and role
         next(); 
     } catch (error) {
         res.status(403).json({ message: 'Invalid or Expired Token!' });
     }
+};
+
+// --- 2. SUPER ADMIN ONLY MIDDLEWARE (Strict Lock 🔒) ---
+const authorizeSuperAdmin = (req, res, next) => {
+    if (req.admin.role !== 'superadmin') {
+        return res.status(403).json({ message: "Access Denied: Only Super Admin can perform this action!" });
+    }
+    next();
 };
 
 // ==========================================
@@ -34,15 +42,24 @@ const authenticateAdmin = (req, res, next) => {
 // ==========================================
 app.post('/admin/login', (req, res) => {
     const { username, password } = req.body;
+    
+    // Check for Super Admin
     if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
-        const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '12h' });
-        res.json({ message: "Login Successful", token });
-    } else {
-        res.status(401).json({ message: "Invalid Username or Password" });
+        const token = jwt.sign({ username, role: 'superadmin' }, process.env.JWT_SECRET, { expiresIn: '12h' });
+        return res.json({ message: "Login Successful", token, role: 'superadmin' });
+    } 
+    // Check for Staff / Moderator
+    else if (username === process.env.MOD_USERNAME && password === process.env.MOD_PASSWORD) {
+        const token = jwt.sign({ username, role: 'moderator' }, process.env.JWT_SECRET, { expiresIn: '12h' });
+        return res.json({ message: "Staff Login Successful", token, role: 'moderator' });
+    } 
+    else {
+        return res.status(401).json({ message: "Invalid Username or Password" });
     }
 });
 
-app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
+// STAFF BLOCKED: Only Super Admin can generate tokens
+app.post('/admin/generate-token', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         const rawToken = crypto.randomBytes(4).toString('hex').toUpperCase(); 
         const newToken = await Token.create({ token: rawToken });
@@ -51,9 +68,9 @@ app.post('/admin/generate-token', authenticateAdmin, async (req, res) => {
 });
 
 // ==========================================
-// 2. PAYMENT APIs (Proportional Logic & History)
+// 2. PAYMENT APIs (Super Admin Only 🔒)
 // ==========================================
-app.get('/admin/payments', authenticateAdmin, async (req, res) => {
+app.get('/admin/payments', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         const agents = await Agent.find();
         const agentPayments = agents.map(agent => {
@@ -62,25 +79,22 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
             const pending = totalEarned - paid;
             return {
                 id: agent._id, name: agent.name, bankDetails: agent.bankDetails,
-                telegramId: agent.telegramId,
-                accountsAdded: agent.totalInstaAccountsAdded,
+                telegramId: agent.telegramId, accountsAdded: agent.totalInstaAccountsAdded,
                 totalEarned, paidAmount: paid, pendingAmount: pending > 0 ? pending : 0
             };
         });
 
         const instaUsers = await InstaUser.find();
         const userPayments = instaUsers.map(user => {
-            // PROPORTIONAL MATH (Decimals allowed)
             const totalEarned = ((user.totalViews || 0) / 1000000) * 800;
             const paid = user.paidAmount || 0;
             const pending = totalEarned - paid;
-            
             const parentAgent = agents.find(a => a.telegramId === user.addedByAgentTelegramId);
-            const agentName = parentAgent ? parentAgent.name : "Unknown Agent";
-
+            
             return {
                 id: user._id, username: user.instaUsername, bankDetails: user.bankDetails,
-                agentName: agentName, totalViews: user.totalViews || 0,
+                agentName: parentAgent ? parentAgent.name : "Unknown Agent",
+                totalViews: user.totalViews || 0,
                 totalEarned: totalEarned.toFixed(4), 
                 paidAmount: paid.toFixed(4), 
                 pendingAmount: pending > 0 ? pending.toFixed(4) : "0.0000",
@@ -91,7 +105,7 @@ app.get('/admin/payments', authenticateAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
+app.post('/admin/agents/:id/pay', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         const agent = await Agent.findById(req.params.id);
         const pending = (agent.totalInstaAccountsAdded * 200) - (agent.paidAmount || 0);
@@ -103,33 +117,29 @@ app.post('/admin/agents/:id/pay', authenticateAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Enhanced Pay API: Adds to history & notifies user on Telegram
-app.post('/admin/users/:id/pay', authenticateAdmin, async (req, res) => {
+app.post('/admin/users/:id/pay', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         const user = await InstaUser.findById(req.params.id);
         const totalEarned = ((user.totalViews || 0) / 1000000) * 800;
         const pending = totalEarned - (user.paidAmount || 0);
         
-        if (pending > 0.0001) { // Micro-payments protection
+        if (pending > 0.0001) {
             user.paidAmount = (user.paidAmount || 0) + pending;
             user.paymentHistory.push({ amount: pending.toFixed(4), date: new Date() });
             await user.save();
             
-            // Telegram Notification
             if (user.telegramId) {
                 const msg = `✅ *Payment Processed!*\n\nAmount: ₹${pending.toFixed(2)}\nStatus: Cleared to your linked bank account.\n\nKeep growing! 🚀`;
                 bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
             }
         }
-        res.json({ message: "User payment cleared and history updated" });
+        res.json({ message: "User payment cleared" });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==========================================
-// 3. WEEKLY VIDEO MANAGEMENT APIs
+// 3. VIDEO MANAGEMENT APIs (Both can access)
 // ==========================================
-
-// Get only active videos (Exclude Archived and Rejected)
 app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     try {
         const videos = await Video.find({ status: { $nin: ['Archived', 'Rejected'] } });
@@ -137,33 +147,27 @@ app.get('/admin/videos/active', authenticateAdmin, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get History (Both Archived and Rejected)
-app.get('/admin/videos/archived', authenticateAdmin, async (req, res) => {
+// Only Super Admin needs to see History
+app.get('/admin/videos/archived', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         const videos = await Video.find({ status: { $in: ['Archived', 'Rejected'] } }).sort({ _id: -1 });
         res.json(videos);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Manual View Update
 app.post('/admin/videos/:id/update-views', authenticateAdmin, async (req, res) => {
     try {
         const { views } = req.body;
         const video = await Video.findById(req.params.id);
-        
         const oldViews = video.views || 0;
         const newViews = parseInt(views) || 0;
-        const viewDifference = newViews - oldViews;
-
         video.views = newViews;
         await video.save();
-
-        await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: viewDifference } });
+        await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: (newViews - oldViews) } });
         res.json({ message: "Views and Earnings updated manually!" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// SMART REJECT: Saves Reason in DB, marks as Rejected, Sends TG Alert
 app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
     try {
         const { reason } = req.body;
@@ -171,66 +175,52 @@ app.post('/admin/videos/:id/reject', authenticateAdmin, async (req, res) => {
         if (!video) return res.status(404).json({ message: "Video not found" });
 
         const user = await InstaUser.findOne({ instaUsername: video.instaUsername });
-
-        // Deduct views if already added
         if (video.views > 0) {
             await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: -video.views } });
         }
-
-        // Notify User
         if (user && user.telegramId) {
-            const msg = `❌ *Video Rejected!*\n\nYour video link:\n${video.videoLink}\n\n*Reason given by Admin:*\n_${reason || 'Not specified'}_\n\nPlease ensure your videos meet our guidelines.`;
-            bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Notify Error", e.message));
+            const msg = `❌ *Video Rejected!*\n\nYour video link:\n${video.videoLink}\n\n*Reason:*\n_${reason || 'Not specified'}_\n\nPlease ensure your videos meet guidelines.`;
+            bot.telegram.sendMessage(user.telegramId, msg, { parse_mode: 'Markdown' }).catch(e => console.log("TG Error:", e.message));
         }
-
-        // Save in DB as Rejected (DO NOT DELETE)
+        
         video.status = 'Rejected';
         video.rejectionReason = reason;
-        video.views = 0; // Reset views for rejected video
+        video.views = 0; 
         await video.save();
-
-        res.json({ message: "Video marked as rejected, reason saved, and user notified." });
+        res.json({ message: "Video rejected." });
     } catch (error) { res.status(500).json({ error: error.message }); }
 }); 
 
-// Archive active videos
-app.post('/admin/videos/archive-all', authenticateAdmin, async (req, res) => {
+// STAFF BLOCKED: Only Super Admin can clear the week
+app.post('/admin/videos/archive-all', authenticateAdmin, authorizeSuperAdmin, async (req, res) => {
     try {
         await Video.updateMany({ status: { $nin: ['Archived', 'Rejected'] } }, { status: 'Archived' });
         res.json({ message: "Dashboard cleared for the new week!" });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// RapidAPI: Auto-Fetch & Auto-Save
 app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
     const { url, videoId } = req.body;
     try {
         const options = {
-            method: 'GET',
-            url: 'https://instagram-looter2.p.rapidapi.com/post', 
+            method: 'GET', url: 'https://instagram-looter2.p.rapidapi.com/post', 
             params: { url: url },
-            headers: {
-                'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-                'x-rapidapi-host': process.env.RAPIDAPI_HOST
-            }
+            headers: { 'x-rapidapi-key': process.env.RAPIDAPI_KEY, 'x-rapidapi-host': process.env.RAPIDAPI_HOST }
         };
-
         const response = await axios.request(options);
         const newViews = response.data?.view_count || response.data?.video_view_count || response.data?.play_count;
 
         if (newViews !== undefined && newViews !== null) {
-            // AUTO SAVE LOGIC
             const video = await Video.findById(videoId);
             if(video) {
                 const oldViews = video.views || 0;
-                const diff = parseInt(newViews) - oldViews;
                 video.views = parseInt(newViews);
                 await video.save();
-                await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: diff } });
+                await InstaUser.updateOne({ instaUsername: video.instaUsername }, { $inc: { totalViews: (parseInt(newViews) - oldViews) } });
             }
             res.json({ success: true, views: newViews });
         } else {
-            res.status(400).json({ success: false, message: "Views count not found in API response." });
+            res.status(400).json({ success: false, message: "Views count not found." });
         }
     } catch (error) {
         console.error("RapidAPI Error:", error.response ? error.response.data : error.message);
@@ -238,19 +228,12 @@ app.post('/admin/videos/fetch-views', authenticateAdmin, async (req, res) => {
     }
 });
 
-// ==========================================
-// 4. SERVER STARTUP
-// ==========================================
 const PORT = process.env.PORT || 3000;
-
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log("MongoDB Connected!");
-        app.listen(PORT, () => console.log(`Admin Server running on port ${PORT} (SECURED)`));
-        bot.launch();
-        console.log("Telegram Bot is running!");
-    })
-    .catch(err => console.error("Database connection error:", err));
+mongoose.connect(process.env.MONGO_URI).then(() => {
+    app.listen(PORT, () => console.log(`Admin Server running on port ${PORT}`));
+    bot.launch();
+    console.log("Telegram Bot is running!");
+}).catch(err => console.error("Database error:", err));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
